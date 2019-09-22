@@ -17,15 +17,6 @@ namespace Oxide.Plugins
 
     class HungerGames : RustLegacyPlugin
     {
-        class DataStore
-        {
-            public Colecciones::List<object> CajasdeArmas = new Colecciones.List<object>();
-            public DataStore()
-            {
-
-            }
-        }
-        DataStore storeData;
         enum OptionFroze
         {
             PlayerFroze,
@@ -53,9 +44,9 @@ namespace Oxide.Plugins
         static Vector3? cachedLocationEvent=null;
         static FieldInfo StructureComponents;
         static bool EventoIniciado = false;
+        static bool EventoEncendido = false;
         static bool ForceStartEvent = false;
         static string SysName = "HungerGames";
-        static bool AgregarCajas = false;
         static NetUser PlayerExecuteCommand = null;
         static int MaximoPlayers = 20; //Poner el Maximo de Players Aqui
         static float TiempodeInicio = 60f; //Poner el Tiempo de Inicio una vez forzado o alcanzado el Maximo de Players
@@ -68,8 +59,10 @@ namespace Oxide.Plugins
                  Purple = "[color #6600CC]",
                  White = "[color #FFFFFF]",
                  Yellow = "[color #FFFF00]";
+        static Colecciones::Dictionary<ulong, Vector3> PlayersPostions = new Colecciones.Dictionary<ulong, Vector3>();
         static Colecciones::Dictionary<string, object> Mensajes = new Colecciones.Dictionary<string, object>();
         static Colecciones::List<NetUser> JugadoresenJuego = new Colecciones.List<NetUser>();
+        static Colecciones::List<NetUser> Players2 = new Colecciones.List<NetUser>();
         static Colecciones::Dictionary<int, Colecciones::Dictionary<int, string>> RamdomItems = new Colecciones.Dictionary<int, Colecciones::Dictionary<int, string>>() { 
         {0, new Colecciones::Dictionary<int,string>(){{1,"Pipe Shotgun"}}},
         {1,new Colecciones::Dictionary<int,string>(){{1,"Revolver"}}},
@@ -94,6 +87,7 @@ namespace Oxide.Plugins
             Mensajes.Add("Informacion", Green + "Type /hg to know more!");
         }
         void RecordInventoryPlayer(NetUser Player){
+            if (Inventarios.ContainsKey(Player.userID)) return;
             var Ropas = new Colecciones::List<object>();
             var Armas = new Colecciones::List<object>();
             var CosasInventarios = new Colecciones::List<object>();
@@ -116,10 +110,14 @@ namespace Oxide.Plugins
                         Ropas.Add(new Colecciones::Dictionary<string, int>() { { Item.datablock.name, Item.datablock._splittable ? (int)Item.uses : 1 } });
                     }
                 }
-                InfoInventario.Add("Ropas", Ropas);
-                InfoInventario.Add("Armas", Armas);
-                InfoInventario.Add("CosasInventario", CosasInventarios);
-                Inventarios.Add(Player.userID, InfoInventario);
+                InfoInventario.Add("Ropas", new Colecciones::List<object>(Ropas));
+                InfoInventario.Add("Armas", new Colecciones::List<object>(Armas));
+                InfoInventario.Add("CosasInventario", new Colecciones::List<object>(CosasInventarios));
+                Inventarios.Add(Player.userID, new Colecciones::Dictionary<string, object>(InfoInventario));
+                InfoInventario.Clear();
+                Ropas.Clear();
+                Armas.Clear();
+                CosasInventarios.Clear();
                 rust.Notice(Player, "Your Inventory Save, if you inventory dont return type /hg Inventory");
                 PlayerInventory.Clear();
             }
@@ -128,6 +126,23 @@ namespace Oxide.Plugins
 
                 Debug.LogError("Error the record Player Inventory in Plugin HungerGames " + ex.Message);
             }
+        }
+        void ForceFinally(NetUser Player)
+        {
+            if (Player.admin == false) return;
+            if (JugadoresenJuego.Count > 0 && JugadoresenJuego.Count==1)
+            {
+                FinalizarEvento(JugadoresenJuego.FirstOrDefault());
+            }
+            foreach (var x in Players2)
+            {
+                if (Inventarios.ContainsKey(x.userID)) ReturnPlayerInventory(x);
+                if (PlayersPostions.ContainsKey(x.userID)) {
+                    ServerController.TeleportPlayerToWorld(x.networkPlayer, PlayersPostions[x.userID]);
+                    PlayersPostions.Remove(x.userID);
+                }
+            }
+            ResetEvent();
         }
         void ReturnPlayerInventory(NetUser Player) {
             if (!Inventarios.ContainsKey(Player.userID)) return;
@@ -180,6 +195,7 @@ namespace Oxide.Plugins
                     }
                 }
                 rust.Notice(Player, "Your Inventory Retorned");
+                Inventarios.Remove(Player.userID);
             }
             catch (Exception ex)
             {
@@ -194,16 +210,14 @@ namespace Oxide.Plugins
         }
         void Loaded()
         {
-            if (storeData == null) { storeData = new DataStore(); Debug.Log("Instance of DataStore Create"); }
+            Debug.Log("Cargado con Exito");
         }
-        void ResetEvent(NetUser Player)
+        void ResetEvent()
         {
-            if (Player.admin == false)
-                return;
             PlayerExecuteCommand = null;
             EventoIniciado = false;
             ForceStartEvent = false;
-            AgregarCajas = false;
+            EventoEncendido = false;
             paredMadera = null;
             AtributeBolean = false;
             AtributeCollider = null;
@@ -212,7 +226,9 @@ namespace Oxide.Plugins
             foreach (NetUser UserGame in JugadoresenJuego.Where(x => x.playerClient.GetComponent<PlayerStatus>() != null))
                 GameObject.Destroy(UserGame.playerClient.GetComponent<PlayerStatus>());
             JugadoresenJuego.Clear();
-            storeData.CajasdeArmas.Clear();
+            Players2.Clear();
+            if (PlayersPostions.Count == 0)
+                PlayersPostions.Clear();
         }
         void PlayerFreezer(NetUser Player, OptionFroze Opcion, bool SendMensaje)
         {
@@ -249,8 +265,14 @@ namespace Oxide.Plugins
                 rust.SendChatMessage(Player, SysName, Green + "HungerGames have the max of " + Red + "players " + White + "please wait that the finally of current event");
                 return;
             }
-            if (EventoIniciado) {
+            if (EventoIniciado==true) {
                 rust.SendChatMessage(Player, SysName, Green + "HungerGames already started " + Red + "please wait that the event finally");
+                return;
+            }
+            if (EventoEncendido == false) { rust.SendChatMessage(Player, SysName, "Hunger Games no esta Iniciado"); return; }
+            if (JugadoresenJuego.Contains(Player) == true)
+            {
+                rust.SendChatMessage(Player, SysName, Green + " You Already in Game");
                 return;
             }
             if (Player.playerClient.GetComponent<PlayerStatus>() == null)
@@ -258,8 +280,14 @@ namespace Oxide.Plugins
             if (Player.playerClient.GetComponent<PlayerStatus>().InGame)
                 return;
             JugadoresenJuego.Add(Player);
+            Players2.Add(Player);
+            RecordInventoryPlayer(Player);
+            PlayersPostions.Add(Player.userID, Player.playerClient.rootControllable.transform.localPosition);
             ServerController.TeleportPlayerToWorld(Player.networkPlayer, cachedLocationEvent ?? new Vector3(Player.playerClient.transform.localPosition.x, Player.playerClient.transform.localPosition.y, Player.playerClient.transform.localPosition.z));
-            rust.BroadcastChat(SysName, string.Format(Mensajes["EntroNormal"].ToString(), JugadoresenJuego.Count, MaximoPlayers));
+            if (ForceStartEvent)
+                rust.BroadcastChat(SysName, string.Format(Mensajes["EntroForzado"].ToString(), JugadoresenJuego.Count));
+            else
+                rust.BroadcastChat(SysName, string.Format(Mensajes["EntroNormal"].ToString(), JugadoresenJuego.Count, MaximoPlayers));
            timer.Once(1f, () =>
            {
                 PlayerFreezer(Player, OptionFroze.PlayerFroze, true);
@@ -270,24 +298,79 @@ namespace Oxide.Plugins
            });
 
         }
+        void OnKilled(TakeDamage damage, DamageEvent evt)
+        {
+            if (evt.victim.client != null)
+            {
+                if (JugadoresenJuego.Contains(evt.victim.client.netUser))
+                {
+                    JugadoresenJuego.Remove(evt.victim.client.netUser);
+                    rust.BroadcastChat(SysName, Yellow + evt.victim.client.netUser.displayName + Red + " out" + White + " " + JugadoresenJuego.Count.ToString() + Blue + " Players in Game");
+                    if (evt.attacker.client != null)
+                    {
+                        if (JugadoresenJuego.Contains(evt.attacker.client.netUser))
+                        {
+                            evt.attacker.client.netUser.playerClient.GetComponent<PlayerStatus>().Kills++;
+                        }
+                    }
+                    if (JugadoresenJuego.Count == 1)
+                    {
+                        FinalizarEvento(JugadoresenJuego.FirstOrDefault());
+                    }
+                }
+            }
+        }
+ /*       void OnPlayerSpawn(PlayerClient client, bool usecamp, RustProto.Avatar avatar)
+        {
+            if (client == null) return;
+            if (Players2.Contains(client.netUser))
+            {
+                if (Inventarios.ContainsKey(client.netUser.userID)) ReturnPlayerInventory(client.netUser);
+                if (PlayersPostions.ContainsKey(client.netUser.userID))
+                {
+                    ServerController.TeleportPlayerToWorld(client.netUser.networkPlayer, PlayersPostions[client.netUser.userID]);
+                    PlayersPostions.Remove(client.netUser.userID);
+                }
+            }
+        }*/
+
         void ForceStart(NetUser Player)
         {
             if (Player.admin == false) { rust.Notice(Player, "No Puedes usar este comando"); return; }
-            if (!EventoIniciado) { rust.SendChatMessage(Player, SysName, "Hunger Games no Esta Iniciado"); return; }
-            for (int i = 0; i < storeData.CajasdeArmas.Count; i++)
+            if (!EventoEncendido) { rust.SendChatMessage(Player, SysName, "Hunger Games no Esta Iniciado"); return; }
+            if (ForceStartEvent) return;
+            rust.BroadcastChat(SysName, Mensajes["InicioForzado"].ToString());
+            rust.BroadcastChat(SysName, Green + "Loaded 1%");
+            rust.BroadcastChat(SysName, Green + "Loaded 15%");
+            timer.Once(3f, () =>
             {
-
-                (storeData.CajasdeArmas[i] as GameObject).GetComponent<Inventory>().AddItemAmount(DatablockDictionary.GetByName("P250"), 1);
-                (storeData.CajasdeArmas[i] as GameObject).GetComponent<Inventory>().AddItemAmount(DatablockDictionary.GetByName("9mm Ammo"), 50);
-                (storeData.CajasdeArmas[i] as GameObject).GetComponent<Inventory>().AddItemAmount(DatablockDictionary.GetByName("Large Medkit"), 2);
-                rust.SendChatMessage(Player, SysName, Green + i.ToString() + Red + " Cajas Cargadas");
-            }
+                rust.BroadcastChat(SysName, Green + "Loaded 20%");
+                rust.BroadcastChat(SysName, Green + "Loaded 50%");
+            });
+            timer.Once(5f, () =>
+            {
+                rust.BroadcastChat(SysName, Green + "Loaded 75%");
+                rust.BroadcastChat(SysName, Green + "Loaded 85%");
+                rust.BroadcastChat(SysName, Green + "Loaded 100%");
+                ForceStartEvent = true;
+                rust.BroadcastChat(SysName, Yellow + "HungerGames Started in 30 Seconds");
+                timer.Once(30f, () =>
+                {
+                    BuscarParedes(Player);
+                    rust.BroadcastChat(SysName, Mensajes["Titulo"].ToString());
+                    rust.BroadcastChat(SysName, Green + "Good Luck" + Yellow + " NO TEAMS" + Red + " Try Whinn");
+                    rust.BroadcastChat(SysName, Mensajes["Footer"].ToString());
+                    EventoIniciado = true;
+                    ForceStartEvent = true;
+                });
+            });
         }
         void IniciarEvento(NetUser Player)
         {
             if (!Player.admin)
                 return;
-            if (EventoIniciado){
+            if (EventoEncendido)
+            {
                 rust.SendChatMessage(Player, SysName, Green + "HungerGames already started " + Red + "wait Please");
                 return;
             }
@@ -295,7 +378,7 @@ namespace Oxide.Plugins
                 rust.SendChatMessage(Player, SysName, Green + "Please Insert the Location where start the event" + Yellow + " /config setlocation");
                 return;
             }
-            EventoIniciado = true;
+            EventoEncendido = true;
             rust.BroadcastChat(SysName, Mensajes["EventoActivadoInfo"].ToString());
             rust.BroadcastChat(SysName, Mensajes["EventoActivado"].ToString());
             rust.BroadcastChat(SysName, Mensajes["Informacion"].ToString());
@@ -312,9 +395,9 @@ namespace Oxide.Plugins
                 if (AtributeCollider.GetComponent<StructureComponent>() != null)
                 {
                     this.paredMadera = AtributeCollider.GetComponent<StructureComponent>();
-                    if (paredMadera.IsWallType())
+                    foreach (StructureComponent objs in (Colecciones::HashSet<StructureComponent>)StructureComponents.GetValue(paredMadera.gameObject.GetComponent<StructureComponent>()._master))
                     {
-                        TakeDamage.KillSelf(this.paredMadera);
+                        if (objs.IsWallType()) TakeDamage.KillSelf(objs);
                     }
                 }
             }
@@ -323,29 +406,109 @@ namespace Oxide.Plugins
                 rust.Notice(Player, "You dont see a WAll Structure ¿?");
             }
         }
-        void OnItemDeployedByPlayer(DeployableObject component, IDeployableItem item)
+        void FinalizarEvento(NetUser Player)
         {
-            if (item.character.playerClient!=null)
+            try
             {
-                if (PlayerExecuteCommand != null)
+                if (Player != null)
+                    Player.playerClient.GetComponent<PlayerStatus>().Whiner = true;
+                rust.BroadcastChat(SysName, Green + "Event End!");
+                rust.BroadcastChat(SysName, Yellow + "TOP PLAYERS");
+                int contador = 0;
+                foreach (var x in Players2.OrderByDescending(x => x.playerClient.GetComponent<PlayerStatus>().Kills))
                 {
-                    if (item.character.playerClient.netUser == PlayerExecuteCommand)
+                    contador++;
+                    try
                     {
-                        storeData.CajasdeArmas.Add(component.gameObject);
-                        rust.SendChatMessage(PlayerExecuteCommand, SysName, Green + "New Box Add in " + Yellow + component.transform.localPosition.x.ToString());
+                        if (x.playerClient.GetComponent<PlayerStatus>().Whiner == true)
+                        {
+                            rust.BroadcastChat(SysName, string.Format("{0} - {1} {2}The Whinner", contador, x.displayName, Yellow));
+                        }
+                        else
+                        {
+                            rust.BroadcastChat(SysName, string.Format("{0} - {1}", contador, x.displayName));
+                        }
                     }
+                    catch (Exception)
+                    {
+                        rust.BroadcastChat(SysName, Red + " Error -> " + Blue + "Notificar a Daniel25A");
+                    }
+                    if (contador == 3) break;
                 }
             }
+            catch (Exception)
+            {
+              
+            }
+            finally
+            {
+                ResetEvent();
+            }
+         
+        }
+        void ClearPlayers(NetUser Player)
+        {
+            if (Player.admin == false) return;
+            JugadoresenJuego.Clear();
+            Players2.Clear();
+           
         }
         [ChatCommand("hg")]
         void HungerGamesCommands(NetUser netUser, string command, string[] args)
         {
-           
+            if (args.Length == 0) return;
+            switch (args[0])
+            {
+                case "init":
+                    IniciarEvento(netUser);
+                    break;
+                case "join":
+                    EntraralJuego(netUser);
+                    break;
+                case "forcestart":
+                    ForceStart(netUser);
+                    return;
+                case "inventory":
+                    if (Inventarios.ContainsKey(netUser.userID)) ReturnPlayerInventory(netUser);
+                    if (PlayersPostions.ContainsKey(netUser.userID))
+                    {
+                        ServerController.TeleportPlayerToWorld(netUser.networkPlayer, PlayersPostions[netUser.userID]);
+                        PlayersPostions.Remove(netUser.userID);
+                    }
+                    break;
+                case "clear":
+                    ClearPlayers(netUser);
+                    break;
+                case "forcefinally":
+                    ForceFinally(netUser);
+                    break;
+                default:
+                    break;
+            }
         }
         [ChatCommand("config")]
-        void FindWallCommand(NetUser Player, string command, string[] args)
+        void cmdConfigCommands(NetUser Player, string command, string[] args)
         {
-           
+            if (Player.admin == false)
+                return;
+            if (args.Length == 0)
+                return;
+            switch (args[0])
+            {
+                case "setlocation":
+                    cachedLocationEvent = Player.playerClient.rootControllable.transform.localPosition;
+                    rust.Notice(Player,"DONE !");
+                    break;
+                case "testsave":
+                    RecordInventoryPlayer(Player);
+                    break;
+                case "testreturn":
+                    ReturnPlayerInventory(Player);
+                    break;
+                default:
+                    rust.SendChatMessage(Player, SysName, "No Existe el Comando");
+                    break;
+            }
         }
     }
 }
